@@ -1,0 +1,74 @@
+S - Situation:
+A significant and widespread outage has occurred in Google Cloud's us-central1 region. Multiple core services, including Compute Engine, Cloud SQL, and regional Cloud Storage buckets, are experiencing unavailability or severe degradation. Our applications and services hosted primarily in us-central1 are inaccessible to users, and critical business operations are impacted. Cloud Monitoring alerts and external status pages confirm the regional failure.
+T - Task:
+The primary task is to activate the Disaster Recovery plan to failover critical applications and services from us-central1 to our designated DR region, us-east1. The goal is to restore service availability within the defined RTO, minimize data loss to meet the RPO, and ensure business continuity. Once us-central1 is fully restored and stable, a failback plan will be executed.
+A - Action:
+The DR process involves several coordinated steps, leveraging specific Google Cloud tools:
+Phase 1: Detection, Assessment, and Decision (Time: 0 - 30 minutes)
+Automated Detection & Alerting:
+Cloud Monitoring: Pre-configured alerts on key metrics (e.g., GCE instance health, Cloud SQL instance availability, API error rates for us-central1 services) trigger notifications.
+Pub/Sub Alerts: Cloud Monitoring alerts are configured to publish messages to a specific Pub/Sub topic. This topic has subscriptions that notify:
+The on-call SRE/DR team via PagerDuty/Slack integrations.
+Automated systems that can initiate preliminary diagnostic checks.
+Google Cloud Status Dashboard: Simultaneously, the DR team monitors the official Google Cloud Status Dashboard for confirmation and updates on the outage.
+Impact Assessment:
+The DR team convenes (virtually) to assess the scope and severity of the outage based on internal alerts and official Google Cloud communications.
+Confirm that the issue is indeed regional and not isolated to our specific project or a transient network blip.
+DR Plan Invocation:
+Based on the assessment and confirmation of a prolonged regional outage, the designated DR Lead (e.g., Head of Infrastructure, Lead SRE) formally declares a disaster and invokes the DR plan. Communication is sent out to all relevant stakeholders.
+Phase 2: Failover Execution (Time: 30 minutes - 1.5 hours)
+Data Layer Failover - Cloud SQL:
+Tool: Cloud SQL Cross-Region Read Replicas.
+Action:
+Our Cloud SQL primary instance in us-central1 has a cross-region read replica configured in us-east1.
+The DR team initiates the promotion of the us-east1 read replica to a standalone, writable primary instance. This process typically takes a few minutes.
+RPO is met because replication lag is generally low (seconds to a few minutes).
+Configuration Update: Application configurations (potentially managed via Secret Manager or Config Connector) are updated to point to the new Cloud SQL primary instance's IP address/connection name in us-east1.
+Object Storage Access - Cloud Storage:
+Tool: Multi-Region Cloud Storage Buckets.
+Action:
+Critical static assets, user uploads, and backups are stored in Multi-Region Cloud Storage buckets (e.g., US multi-region).
+These buckets remain accessible even if one of the constituent regions (us-central1) is down. Applications deployed in us-east1 can directly access data from these multi-region buckets without any failover step for the storage itself.
+For any regional buckets in us-central1 that might contain non-critical or temporarily staged data, this data will be unavailable until us-central1 recovers. (Our strategy prioritizes multi-region for critical data).
+Application & Compute Layer Failover - Compute Engine / GKE:
+Tool: Instance Templates, Managed Instance Groups (MIGs) / GKE Regional/Autopilot clusters, Global Load Balancer.
+Action (assuming GCE with MIGs for simplicity):
+Pre-configured Instance Templates for our application servers exist in us-east1.
+MIGs in us-east1 are scaled up from a minimal standby count (e.g., 0 or 1 instance for health checks) to the required capacity to handle production traffic. This can be manual or automated via scripts triggered by the DR invocation.
+If using GKE, regional clusters in us-east1 would be scaled up, or new workloads deployed to existing us-east1 clusters.
+Application Deployment: Container images are pulled from Artifact Registry (which is regional, so ensure images are also available in us-east1 or use a multi-region registry if available/appropriate for the artifact type). Applications are deployed/started on the new compute instances.
+Traffic Redirection - Cloud DNS & Global Load Balancing:
+Tool: Global HTTP(S) Load Balancer, Cloud DNS.
+Action:
+Our primary entry point is a Global HTTP(S) Load Balancer. It has backend services configured with instance groups in both us-central1 (primary) and us-east1 (DR, initially with low/no capacity).
+As us-central1 backends become unhealthy, the Global Load Balancer automatically starts directing traffic to healthy backends in us-east1 once they are scaled up and pass health checks.
+For non-HTTP(S) traffic or direct CNAME/A record dependencies, Cloud DNS records might need to be updated to point to resources in us-east1. This should be scripted for speed and accuracy.
+Messaging - Pub/Sub:
+Tool: Pub/Sub (Global Service).
+Action:
+Pub/Sub topics and subscriptions are global by default. Publishers and subscribers in us-east1 can continue to publish to and pull from the same topics/subscriptions.
+Message storage policy might be relevant: If messages were configured to be stored only in us-central1, new messages would be stored according to the policy (e.g., geo-replicated if not restricted). Messages already acked or expired from us-central1 would not be an issue. Unacked messages in us-central1 specific storage might be delayed until the region recovers. We use default (global) message storage.
+Validation & Communication:
+The DR team performs smoke tests and critical functionality checks on the applications now running in us-east1.
+Internal and external stakeholders are updated on the service restoration.
+Phase 3: Recovery and Failback (Post us-central1 Restoration)
+Monitoring us-central1 Recovery:
+Continuously monitor official Google Cloud communications and our Cloud Monitoring dashboards for the full restoration and stabilization of us-central1.
+Data Synchronization:
+Once us-central1 is stable, set up replication from the current Cloud SQL primary in us-east1 back to a new instance in us-central1.
+Allow time for the replica in us-central1 to fully catch up.
+For Cloud Storage, if any new data was written to regional buckets in us-east1 (not best practice for this DR scenario), it would need to be synchronized back to us-central1 using gsutil rsync or Storage Transfer Service. (Our design relies on Multi-Region buckets to avoid this complexity).
+Controlled Failback:
+Schedule a maintenance window for failback.
+Promote the Cloud SQL instance in us-central1 back to primary, and reconfigure the us-east1 instance as its cross-region replica. Update application configurations.
+Gradually shift traffic back to us-central1 using the Global Load Balancer by increasing capacity in us-central1 MIGs and reducing capacity in us-east1.
+Update any DNS records if they were changed.
+Decommission DR Environment (Scale Down):
+Once services are stable in us-central1, scale down compute resources in us-east1 to their standby state.
+Post-Mortem and DR Plan Refinement:
+Conduct a thorough post-mortem of the DR event.
+Update the DR plan with lessons learned.
+Schedule regular DR testing.
+R - Result:
+Initial Result (Post-Failover): Critical business services are successfully restored and operational in the us-east1 DR region. User access is re-established. The RTO of < 2 hours is met. Data loss is minimized to within the RPO of < 15 minutes, primarily limited by the Cloud SQL replication lag at the time of promotion.
+Final Result (Post-Failback): Services are fully restored to the primary us-central1 region with normal operational parameters. The DR environment in us-east1 is returned to a standby state. The business has weathered the regional outage with minimal disruption. The DR plan is validated and refined based on the real-world event.
